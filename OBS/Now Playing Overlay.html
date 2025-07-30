@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Radio Now Playing Overlay</title>
+<style>
+  body {
+    margin: 0; padding: 0;
+    background: transparent;
+    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    color: white;
+    user-select: none;
+  }
+   #nowPlaying {
+    position: absolute;
+    bottom: 5vh; left: 4vw;
+    font-size: 2.2vw;
+    max-width: 300vw;
+    background: rgba(0,0,0,0.5);
+    padding: 5vh 3vw;
+    border-radius: 50px;
+    display: flex; align-items: center;
+    gap: 1.5vw;
+    opacity: 1;
+    overflow: hidden;
+    z-index: 10;
+    flex-wrap: wrap;
+  }
+  #coverArt {
+    width: 12vw;
+    height: 12vw;
+    min-width: 120px;
+    min-height: 120px;
+    border-radius: 10px;
+    object-fit: cover;
+    box-shadow: 0 0 8px rgba(255,255,255,0.6);
+    flex-shrink: 0;
+  }
+  #trackInfo {
+    flex: 1 1 60%;
+    overflow: hidden;
+  }
+  #trackTitle, #artistName, #albumName {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin: 0;
+  }
+  #trackTitle {
+    font-weight: bold;
+    font-size: 1.8em;
+  }
+  #artistName {
+    font-size: 1.3em;
+    opacity: 0.8;
+  }
+  #albumName {
+    font-size: 0.95em;
+    opacity: 0.65;
+    font-style: italic;
+    margin: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  #progressContainer {
+    width: 100%;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 8px;
+  }
+
+  #progressBar {
+    height: 100%;
+    background: #1db954;
+    width: 0%;
+    transition: width 0.4s linear;
+    border-radius: 3px;
+  }
+</style>
+</head>
+<body>
+
+<div id="nowPlaying">
+  <img id="coverArt" src="" alt="Cover Art" />
+  <div id="info">
+    <p id="trackTitle">Laden...</p>
+    <p id="artistName"></p>
+    <p id="albumName"></p>
+    <div id="progressContainer">
+      <div id="progressBar"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const API_URL = "https://radio.com/api/nowplaying/radio_1";
+
+  let currentTrack = null;
+  let trackStartTime = 0;
+  let trackDuration = 0;
+  let progressTimer = null;
+
+  const trackTitleEl = document.getElementById("trackTitle");
+  const artistNameEl = document.getElementById("artistName");
+  const albumNameEl = document.getElementById("albumName");
+  const coverEl = document.getElementById("coverArt");
+  const progressBarEl = document.getElementById("progressBar");
+
+  async function fetchNowPlaying() {
+    try {
+      const res = await fetch(API_URL);
+      if (!res.ok) throw new Error("Netwerkfout");
+
+      const data = await res.json();
+      const np = data.now_playing;
+
+      if (!np || !np.song) return;
+
+      const title = np.song.title || "Onbekend nummer";
+      const artist = np.song.artist || "Onbekende artiest";
+      const album = np.song.album || "";
+      const cover = np.song.art || "";
+      const duration = np.duration || 0; // seconden
+      const playedAt = np.played_at || Math.floor(Date.now() / 1000);
+
+      if (title !== currentTrack) {
+        currentTrack = title;
+        trackDuration = duration;
+        trackStartTime = playedAt * 1000;
+
+        updateUI(title, artist, album, cover);
+        startProgressBar();
+      }
+    } catch (e) {
+      console.error("Fout bij ophalen:", e);
+    }
+  }
+
+  function updateUI(title, artist, album, cover) {
+    trackTitleEl.textContent = title;
+    artistNameEl.textContent = artist;
+    albumNameEl.textContent = album;
+    coverEl.src = cover || "https://via.placeholder.com/70x70?text=No+Cover";
+  }
+
+  function startProgressBar() {
+    if (progressTimer) clearInterval(progressTimer);
+
+    progressTimer = setInterval(() => {
+      const now = Date.now();
+      let elapsed = (now - trackStartTime) / 1000;
+      let progress = Math.min(elapsed / trackDuration, 1);
+      progressBarEl.style.width = (progress * 100) + "%";
+
+      if (progress >= 1) {
+        clearInterval(progressTimer);
+        progressBarEl.style.width = "0%";
+      }
+    }, 500);
+  }
+
+  // Update elke 5 seconden
+  setInterval(fetchNowPlaying, 5000);
+  fetchNowPlaying();
+</script>
+
+</body>
+</html>

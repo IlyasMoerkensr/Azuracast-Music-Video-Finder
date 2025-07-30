@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <title>AzuraCast YouTube Overlay</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0;
+      width: 100%; height: 100%;
+      background: transparent;
+      overflow: hidden;
+    }
+    #player {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+      display: none; /* standaard verborgen */
+    }
+  </style>
+</head>
+<body>
+  <div id="player"></div>
+
+  <script>
+    const API_URL = "http://localhost:3000/proxy/nowplaying";
+    const PROXY_SEARCH_URL = "http://localhost:3000/api/v1/search";
+    const SPONSORBLOCK_API = "https://sponsor.ajay.app/api/skipSegments";
+
+    let currentSongId = null;
+    let currentVideoId = null;
+    let player;
+    let syncCount = 0;
+    let syncInterval = null;
+    let sponsorSkipSegments = [];
+
+    function loadYouTubeAPI() {
+      return new Promise((resolve) => {
+        if (window.YT && window.YT.Player) return resolve();
+        const tag = document.createElement('script');
+        tag.src = "https://www.youtube.com/iframe_api";
+        document.head.appendChild(tag);
+        window.onYouTubeIframeAPIReady = () => resolve();
+      });
+    }
+
+    function cleanTitle(title) {
+      return title.toLowerCase()
+        .replace(/\(.*?official.*?\)/gi, '')
+        .replace(/\[.*?official.*?\]/gi, '')
+        .replace(/official music video/gi, '')
+        .replace(/official video/gi, '')
+        .replace(/[\[\]()]/g, '')
+        .replace(/[^a-z0-9 ]+/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function getSimilarityScore(a, b) {
+      const wordsA = new Set(cleanTitle(a).split(' '));
+      const wordsB = new Set(cleanTitle(b).split(' '));
+      const intersection = new Set([...wordsA].filter(x => wordsB.has(x)));
+      return intersection.size / Math.max(wordsA.size, wordsB.size);
+    }
+
+    function findBestMatchingVideo(results, cleanedTarget) {
+      let bestMatch = null;
+      let highestScore = 0;
+
+      for (const result of results) {
+        if (!result.title || typeof result.title !== 'string') continue;
+        const cleaned = cleanTitle(result.title);
+        const score = getSimilarityScore(cleaned, cleanedTarget);
+        console.log(`[Overlay] Vergelijk "${result.title}" vs "${cleanedTarget}" = ${score.toFixed(2)}`);
+
+        let videoUrl = result.url || result.webpage_url || result.video_url || null;
+        if (!videoUrl) continue;
+
+        if (score > highestScore) {
+          bestMatch = { ...result, url: videoUrl };
+          highestScore = score;
+        }
+      }
+      return highestScore >= 0.4 ? bestMatch : null;
+    }
+
+    function extractVideoId(url) {
+      try {
+        const urlObj = new URL(url);
+        if (urlObj.hostname.includes('youtu.be')) return urlObj.pathname.slice(1);
+        return urlObj.searchParams.get('v');
+      } catch {
+        return null;
+      }
+    }
+
+    async function fetchSponsorSegments(videoId) {
+      try {
+        const res = await fetch(`${SPONSORBLOCK_API}?videoID=${videoId}&category=[music_offtopic]`);
+        if (!res.ok) throw new Error("SponsorBlock failed");
+        const segments = await res.json();
+        return segments.flatMap(s => s.segments);
+      } catch (e) {
+        console.warn("[Overlay] SponsorBlock error:", e);
+        return [];
+      }
+    }
+
+    function getAdjustedTime(originalElapsed) {
+      let adjusted = originalElapsed + 0; // 0 seconden voorsprong
+      for (const [start, end] of sponsorSkipSegments) {
+        if (adjusted >= start && adjusted < end) {
+          adjusted = end;
+        }
+      }
+      return adjusted;
+    }
+
+    function createOrUpdatePlayer(videoId, startSeconds) {
+      return new Promise((resolve) => {
+        document.getElementById("player").style.display = "block";
+        if (player && currentVideoId === videoId) {
+          syncPlayback(startSeconds);
+          resolve();
+          return;
+        }
+
+        currentVideoId = videoId;
+
+        if (player) {
+          player.loadVideoById({ videoId, startSeconds });
+          player.seekTo(startSeconds, true);
+          player.playVideo();
+          resolve();
+        } else {
+          player = new YT.Player('player', {
+            videoId,
+            playerVars: {
+              autoplay: 1,
+              controls: 0,
+              modestbranding: 1,
+              rel: 0,
+              fs: 0,
+              mute: 1,
+              start: Math.floor(startSeconds),
+              iv_load_policy: 3,
+              disablekb: 1,
+            },
+            events: {
+              onReady: (event) => {
+                event.target.mute();
+                event.target.seekTo(startSeconds, true);
+                event.target.playVideo();
+                resolve();
+              },
+              onError: (e) => {
+                console.error("[Overlay] YouTube fout:", e);
+                resolve();
+              }
+            }
+          });
+        }
+      });
+    }
+
+    function syncPlayback(elapsed) {
+      if (!player || typeof player.getCurrentTime !== 'function') return;
+      if (syncCount >= 3) return;
+
+      const adjusted = getAdjustedTime(elapsed);
+      const current = player.getCurrentTime();
+      const diff = Math.abs(current - adjusted);
+
+      if (diff > 5) {
+        console.log(`[Overlay] Sync playback van ${current.toFixed(2)} naar ${adjusted.toFixed(2)}`);
+        player.seekTo(adjusted, true);
+      }
+      syncCount++;
+    }
+
+    async function fetchNowPlaying() {
+      const res = await fetch(API_URL);
+      if (!res.ok) throw new Error("Proxy API failed");
+      return res.json();
+    }
+
+    async function fetchVideoData(query) {
+      const res = await fetch(`${PROXY_SEARCH_URL}?q=${encodeURIComponent(query)}`);
+      if (!res.ok) throw new Error("yt-dlp proxy search failed");
+      return res.json();
+    }
+
+    async function mainLoop() {
+      try {
+        const data = await fetchNowPlaying();
+        const song = data.now_playing?.song;
+        const elapsed = data.now_playing?.elapsed ?? 0;
+
+        if (!song || !song.artist || !song.title) {
+          if (player) player.stopVideo();
+          document.getElementById("player").style.display = "none";
+          currentSongId = null;
+          currentVideoId = null;
+          setTimeout(mainLoop, 10000);
+          return;
+        }
+
+        const query = `${song.artist} - ${song.title}`;
+        const cleanedQuery = cleanTitle(query);
+
+        if (song.id !== currentSongId) {
+          currentSongId = song.id;
+          console.log('[Overlay] Nieuw nummer:', query);
+
+          const results = await fetchVideoData(query);
+          const bestMatch = findBestMatchingVideo(results, cleanedQuery);
+
+          if (!bestMatch || !bestMatch.url) {
+            if (player) player.stopVideo();
+            document.getElementById("player").style.display = "none";
+            currentVideoId = null;
+            setTimeout(mainLoop, 5000);
+            return;
+          }
+
+          const videoId = extractVideoId(bestMatch.url);
+          if (!videoId) {
+            if (player) player.stopVideo();
+            document.getElementById("player").style.display = "none";
+            currentVideoId = null;
+            setTimeout(mainLoop, 5000);
+            return;
+          }
+
+          sponsorSkipSegments = await fetchSponsorSegments(videoId);
+          syncCount = 0;
+
+          const adjustedTime = getAdjustedTime(elapsed);
+          await createOrUpdatePlayer(videoId, adjustedTime);
+        } else {
+          syncPlayback(elapsed);
+        }
+      } catch (e) {
+        console.error('[Overlay] mainLoop error:', e);
+      } finally {
+        setTimeout(mainLoop, 5000);
+      }
+    }
+
+    (async () => {
+      await loadYouTubeAPI();
+      mainLoop();
+    })();
+  </script>
+</body>
+</html>
